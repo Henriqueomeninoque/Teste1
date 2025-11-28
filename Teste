@@ -1,0 +1,109 @@
+-- Script (colocar em ServerScriptService)
+-- Teleporta o jogador no servidor ao receber pedido do cliente.
+-- Usa CollectionService tag "Base" por padrão; também suporta BASE_NAME.
+-- Segurança: cooldown por jogador e validação do Character/HumanoidRootPart.
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+local CollectionService = game:GetService("CollectionService")
+local Workspace = game:GetService("Workspace")
+
+local REMOTE_NAME = "RequestTeleportToBase" -- RemoteEvent em ReplicatedStorage
+local BASE_TAG = "Base" -- tag recomendada (CollectionService)
+local BASE_NAME = "Base" -- fallback: procura por nome se não houver tagged
+local TELEPORT_OFFSET = Vector3.new(0, 5, 0)
+local COOLDOWN = 5 -- segundos
+
+-- garante RemoteEvent
+local remote = ReplicatedStorage:FindFirstChild(REMOTE_NAME)
+if not remote then
+    remote = Instance.new("RemoteEvent")
+    remote.Name = REMOTE_NAME
+    remote.Parent = ReplicatedStorage
+end
+
+local cooldowns = {}
+
+local function findInstanceByName(root, name)
+    if not root then return nil end
+    if root.Name == name then return root end
+    for _, child in ipairs(root:GetChildren()) do
+        local res = findInstanceByName(child, name)
+        if res then return res end
+    end
+    return nil
+end
+
+local function getRepresentativePart(inst)
+    if not inst then return nil end
+    if inst:IsA("BasePart") then
+        return inst
+    elseif inst:IsA("Model") then
+        if inst.PrimaryPart and inst.PrimaryPart:IsA("BasePart") then
+            return inst.PrimaryPart
+        end
+        for _, child in ipairs(inst:GetDescendants()) do
+            if child:IsA("BasePart") then
+                return child
+            end
+        end
+    end
+    return nil
+end
+
+remote.OnServerEvent:Connect(function(player, requestedBaseName)
+    if not player or not player:IsA("Player") then return end
+
+    local now = tick()
+    local last = cooldowns[player.UserId]
+    if last and (now - last) < COOLDOWN then
+        -- opcional: ignorar pedidos durante cooldown
+        remote:FireClient(player, false, "Aguarde o cooldown antes de teleportar novamente.")
+        return
+    end
+
+    -- encontra a base: prioriza CollectionService tag, depois nome (request > config)
+    local baseInstance = nil
+    local tagged = CollectionService:GetTagged(BASE_TAG)
+    if #tagged > 0 then
+        baseInstance = tagged[1]
+    end
+
+    if not baseInstance then
+        local nameToFind = requestedBaseName or BASE_NAME
+        if type(nameToFind) == "string" and nameToFind ~= "" then
+            baseInstance = findInstanceByName(Workspace, nameToFind)
+        end
+    end
+
+    if not baseInstance then
+        remote:FireClient(player, false, "Base não encontrada no servidor.")
+        return
+    end
+
+    local part = getRepresentativePart(baseInstance)
+    if not part then
+        remote:FireClient(player, false, "Ponto de teleporte inválido.")
+        return
+    end
+
+    local char = player.Character
+    if not char then
+        remote:FireClient(player, false, "Character não encontrado.")
+        return
+    end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then
+        remote:FireClient(player, false, "HumanoidRootPart não encontrado.")
+        return
+    end
+
+    -- Teleporte seguro: set CFrame e zerar velocidade
+    local targetCFrame = part.CFrame + TELEPORT_OFFSET
+    hrp.CFrame = targetCFrame
+    hrp.Velocity = Vector3.new(0, 0, 0)
+    hrp.RotVelocity = Vector3.new(0, 0, 0)
+
+    cooldowns[player.UserId] = now
+    remote:FireClient(player, true, "Teleportado com sucesso.")
+end)
